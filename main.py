@@ -11,8 +11,7 @@ app = FastAPI()
 # CORS - Permite GitHub Pages (ajusta según tu URL real)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://carloscarlos50.github.io/"    ],  # Cambia si usas otro dominio
+    allow_origins=[https://carloscarlos50.github.io/],  # Cambia si usas otro dominio
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -93,4 +92,3 @@ if __name__ == "__main__":
 
     port = int(os.getenv("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
- 
