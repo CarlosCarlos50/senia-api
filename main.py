@@ -11,7 +11,7 @@ app = FastAPI()
 # CORS - Permite GitHub Pages (ajusta según tu URL real)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://carloscarlos50.github.io"],  # Cambia si usas otro dominio
+    allow_origins=["https://senia2-0.vercel.app"],  # Cambia si usas otro dominio
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
