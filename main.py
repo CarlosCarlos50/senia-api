@@ -28,7 +28,7 @@ except Exception as e:
 # ── Modelo dinámico ──────────────────────────────────────────────────────────
 try:
     import tensorflow as tf
-    modelo_dinamico = tf.keras.models.load_model("modelo_lsm.keras")
+    modelo_dinamico = tf.keras.models.load_model("modelo_lsm.keras", compile=False)
     with open("label_encoder.pkl", "rb") as f:
         le_dinamico = pickle.load(f)
     print("✅ Modelo dinámico cargado")
@@ -134,6 +134,20 @@ async def predecir(entrada: DatosMano):
  
     return {"indice": -1, "confianza": 0, "signo": "", "modelo": "ninguno"}
  
+ 
+@app.get("/")
+async def root():
+    return {
+        "mensaje": "API SeñIA — Dual Model",
+        "modelo_estatico": modelo_estatico is not None,
+        "modelo_dinamico": modelo_dinamico is not None,
+    }
+ 
+ 
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
  
 @app.get("/")
 async def root():
