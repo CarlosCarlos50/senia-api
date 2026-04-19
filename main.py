@@ -12,7 +12,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://senia2-0.vercel.app"],  # o "*" para pruebas
+    allow_origins=["https://senia2-0.vercel.app"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -30,17 +30,16 @@ except Exception as e:
 modelo_dinamico = None
 le_dinamico = None
 try:
-    # Deshabilitar GPU para evitar advertencias (opcional)
+    # Forzar CPU (evita warnings de GPU)
     tf.config.set_visible_devices([], 'GPU')
-    # Cargar el SavedModel desde la carpeta
-    modelo_dinamico = tf.saved_model.load("modelo_lsm.pb")
-    # Obtener la firma de inferencia por defecto
+    # Cargar el SavedModel (cambia "modelo_lsm" por el nombre de tu carpeta)
+    modelo_dinamico = tf.saved_model.load("modelo_lsm_savedmodel-20260419T192453Z-3-001")
+    # Obtener la firma por defecto
     infer = modelo_dinamico.signatures['serving_default']
     print("✅ Modelo dinámico (SavedModel) cargado")
     print("Firma de entrada:", infer.structured_input_signature)
     print("Firma de salida:", infer.structured_outputs)
     
-    # Cargar el label encoder
     with open("label_encoder.pkl", "rb") as f:
         le_dinamico = pickle.load(f)
 except Exception as e:
@@ -51,7 +50,7 @@ except Exception as e:
 # ========== CONSTANTES ==========
 LETRAS_ESTATICAS = ["A","B","C","D","E","F","G","H","I","L","M","N","O","P","R","S","T","U","V","W","Y"]
 
-# ========== NORMALIZACIÓN (estático) ==========
+# ========== NORMALIZACIÓN ==========
 def normalizar_puntos_estatico(puntos_lista: list) -> list:
     pts = np.array(puntos_lista[:63], dtype=np.float32).reshape(21, 3)
     muneca = pts[0]
@@ -90,23 +89,16 @@ async def predecir(entrada: DatosMano):
         entrada.secuencia is not None and len(entrada.secuencia) == 20):
         try:
             seq = np.array(entrada.secuencia, dtype=np.float32)  # (20, 136)
-            # Añadir dimensión de batch: (1, 20, 136)
-            seq = np.expand_dims(seq, axis=0)
-            # Convertir a tensor
+            seq = np.expand_dims(seq, axis=0)  # (1, 20, 136)
             input_tensor = tf.convert_to_tensor(seq)
-            # Llamar al modelo (la firma 'serving_default' puede esperar un tensor con nombre)
-            # Si el SavedModel espera un nombre de entrada específico, usa un dict. Por defecto, intentamos con el tensor solo.
-            # Algunos modelos requieren dict: {'input': input_tensor}
-            try:
-                predictions = infer(input_tensor)
-            except Exception:
-                # Si falla, probar con dict (el nombre de entrada puede ser 'input_1' o similar)
-                # Puedes listar las claves con: list(infer.structured_input_signature)
-                predictions = infer(inputs=input_tensor)  # prueba común
             
-            # Extraer la salida (normalmente es el único valor)
+            # Llamar al SavedModel. Algunos modelos esperan un diccionario con el nombre de la entrada.
+            # Obtenemos el nombre de la primera entrada de la firma
+            input_name = list(infer.structured_input_signature[1].keys())[0]
+            predictions = infer(**{input_name: input_tensor})
+            
             output = next(iter(predictions.values()))
-            probs = output.numpy()[0]  # array de probabilidades
+            probs = output.numpy()[0]
             idx = np.argmax(probs)
             confianza = round(float(probs[idx]) * 100, 2)
             label = str(le_dinamico.inverse_transform([idx])[0])
@@ -147,10 +139,6 @@ async def root():
         "modelo_dinamico": modelo_dinamico is not None,
     }
 
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
