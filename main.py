@@ -33,7 +33,7 @@ try:
     # Forzar CPU (evita warnings de GPU)
     tf.config.set_visible_devices([], 'GPU')
     # Cargar el SavedModel (cambia "modelo_lsm" por el nombre de tu carpeta)
-    modelo_dinamico = tf.saved_model.load("modelo_lsm_savedmodel-20260419T192453Z-3-001")
+    modelo_dinamico = tf.saved_model.load("modelo_lsm_savedmodel")
     # Obtener la firma por defecto
     infer = modelo_dinamico.signatures['serving_default']
     print("✅ Modelo dinámico (SavedModel) cargado")
