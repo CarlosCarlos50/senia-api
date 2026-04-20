@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import joblib
 import numpy as np
@@ -10,13 +10,21 @@ import tensorflow as tf
 
 app = FastAPI()
 
+# ========== CORS ==========
+# Permite los orígenes necesarios (agrega el dominio de Vercel)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://senia2-0.vercel.app"],
+    allow_origins=[
+        "https://senia2-0-uqbm2qwun-carloscarlos50s-projects.vercel.app",
+        "https://senia2-0.vercel.app",          # tu dominio principal de Vercel
+        # "http://localhost:3000",               # para pruebas locales
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ... el resto de tu código (carga de modelos, endpoints, etc.) no cambia
 
 # ========== MODELO ESTÁTICO ==========
 try:
