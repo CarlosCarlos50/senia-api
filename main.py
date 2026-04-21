@@ -2,134 +2,96 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import joblib
 import numpy as np
-import tensorflow as tf
-import pickle
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List
 import os
 
 app = FastAPI()
 
+# CORS - Permite GitHub Pages (ajusta según tu URL real)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://senia2-0-uqbm2qwun-carloscarlos50s-projects.vercel.app",
-        "https://senia2-0.vercel.app",          # tu dominio principal de Vercel
-        # "http://localhost:3000",               # para pruebas locales
-    ],
+        "http://localhost:5500",
+        "https://senia2-0.vercel.app",
+    ],  # Cambia si usas otro dominio
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-
-# ========== MODELO ESTÁTICO ==========
-modelo_estatico = None
+# Cargar modelo
 try:
-    modelo_estatico = joblib.load("sign_language_model.pkl")
-    print("✅ Modelo estático cargado")
+    modelo = joblib.load("sign_language_model.pkl")
+    print("✅ Modelo cargado correctamente")
 except Exception as e:
-    print(f"❌ Error cargando modelo estático: {e}")
+    print(f"❌ Error al cargar el modelo: {e}")
+    modelo = None
 
-# ========== MODELO DINÁMICO (SavedModel) ==========
-modelo_dinamico = None
-le_dinamico = None
-try:
-    # Cargar el SavedModel desde la carpeta 'modelo_lsm_savedmodel'
-    modelo_dinamico = tf.saved_model.load("modelo_lsm_savedmodel")
-    # Obtener la firma por defecto
-    infer = modelo_dinamico.signatures['serving_default']
-    print("✅ Modelo dinámico (SavedModel) cargado")
-    print("Firma de entrada:", infer.structured_input_signature)
-    print("Firma de salida:", infer.structured_outputs)
 
-    # Cargar el label encoder
-    with open("label_encoder.pkl", "rb") as f:
-        le_dinamico = pickle.load(f)
-except Exception as e:
-    print(f"❌ Error cargando modelo dinámico: {e}")
-
-# ========== CONSTANTES ==========
-LETRAS_ESTATICAS = ["A","B","C","D","E","F","G","H","I","L","M","N","O","P","R","S","T","U","V","W","Y"]
-
-# ========== NORMALIZACIÓN (estático) ==========
-def normalizar_puntos_estatico(puntos_lista: list) -> list:
-    pts = np.array(puntos_lista[:63], dtype=np.float32).reshape(21, 3)
-    muneca = pts[0]
-    pts_centrados = pts - muneca
-    distancias = np.linalg.norm(pts_centrados[1:], axis=1)
-    tamano = float(np.max(distancias)) if np.max(distancias) > 0 else 1.0
-    return (pts_centrados / tamano).flatten().tolist()
-
-# ========== MODELOS DE DATOS ==========
 class DatosMano(BaseModel):
     puntos: List[float]
-    secuencia: Optional[List[List[float]]] = None   # 20 frames de 135 puntos
 
-# ========== ENDPOINT PRINCIPAL ==========
+
+def normalizar_puntos(puntos_lista):
+    """
+    Normaliza los 63 puntos (21 landmarks * 3 coordenadas)
+    para que sean invariantes a traslación y escala.
+    """
+    pts = np.array(puntos_lista, dtype=np.float32).reshape(21, 3)
+    # Centrar en la muñeca (landmark 0)
+    muneca = pts[0]
+    pts_centrados = pts - muneca
+    # Calcular tamaño de la mano (distancia máxima desde muñeca)
+    distancias = np.linalg.norm(pts_centrados[1:], axis=1)
+    tamaño = np.max(distancias) if np.max(distancias) > 0 else 1.0
+    # Escalar
+    pts_normalizados = pts_centrados / tamaño
+    # Aplanar de vuelta a 63
+    return pts_normalizados.flatten().tolist()
+
+
 @app.post("/predecir")
 async def predecir(entrada: DatosMano):
-    res_estatico = None
-    res_dinamico = None
+    if modelo is None:
+        raise HTTPException(status_code=500, detail="Modelo no disponible")
 
-    # --- Modelo estático ---
-    if modelo_estatico is not None and len(entrada.puntos) >= 63:
-        try:
-            puntos_norm = normalizar_puntos_estatico(entrada.puntos)
-            datos = np.array(puntos_norm).reshape(1, -1)
-            pred = modelo_estatico.predict(datos)
-            proba = modelo_estatico.predict_proba(datos)
-            res_estatico = {
-                "indice": int(pred[0]),
-                "confianza": round(float(np.max(proba[0])) * 100, 2),
-            }
-        except Exception as e:
-            print(f"Error en estático: {e}")
+    try:
+        if len(entrada.puntos) != 63:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Se esperaban 63 puntos, se recibieron {len(entrada.puntos)}",
+            )
 
-    # --- Modelo dinámico (SavedModel) ---
-    if (modelo_dinamico is not None and le_dinamico is not None and
-        entrada.secuencia is not None and len(entrada.secuencia) == 20):
-        try:
-            seq = np.array(entrada.secuencia, dtype=np.float32)  # (20, 135)
-            seq = np.expand_dims(seq, axis=0)  # (1, 20, 135)
-            input_tensor = tf.convert_to_tensor(seq)
-            # El nombre del tensor de entrada suele ser 'input_1' (ajusta según logs)
-            predictions = infer(input_1=input_tensor)
-            output = predictions['output_0'].numpy()[0]
-            idx = np.argmax(output)
-            confianza = round(float(output[idx]) * 100, 2)
-            signo = le_dinamico.inverse_transform([idx])[0]
-            res_dinamico = {"signo": signo, "confianza": confianza}
-        except Exception as e:
-            print(f"Error en dinámico: {e}")
+        # Normalizar los puntos ANTES de pasarlos al modelo
+        puntos_normalizados = normalizar_puntos(entrada.puntos)
+        datos = np.array(puntos_normalizados).reshape(1, -1)
 
-    # --- Selección automática (prioriza dinámico con alta confianza) ---
-    if res_dinamico and res_dinamico["confianza"] > 70:
-        return {
-            "indice": -1,
-            "confianza": res_dinamico["confianza"],
-            "signo": res_dinamico["signo"],
-            "modelo": "dinamico"
-        }
-    elif res_estatico:
-        signo = LETRAS_ESTATICAS[res_estatico["indice"]] if res_estatico["indice"] < len(LETRAS_ESTATICAS) else "?"
-        return {
-            "indice": res_estatico["indice"],
-            "confianza": res_estatico["confianza"],
-            "signo": signo,
-            "modelo": "estatico"
-        }
-    return {"indice": -1, "confianza": 0, "signo": "", "modelo": "ninguno"}
+        prediccion = modelo.predict(datos)
+        resultado = int(prediccion[0])
+
+        # Obtener probabilidades
+        probabilidades = modelo.predict_proba(datos)
+        confianza = float(np.max(probabilidades[0])) * 100  # Convertir a porcentaje
+
+        print(f"Predicción realizada: Índice {resultado}, Confianza: {confianza:.2f}%")
+        return {"indice": resultado, "confianza": round(confianza, 2)}
+
+    except Exception as e:
+        print(f"Error en proceso: {e}")
+        return {"indice": -1, "confianza": 0}
+
 
 @app.get("/")
 async def root():
     return {
-        "mensaje": "API SeñIA Dual",
-        "estatico": modelo_estatico is not None,
-        "dinamico": modelo_dinamico is not None
+        "mensaje": "API de SeñIA con normalización",
+        "modelo_cargado": modelo is not None,
     }
+
 
 if __name__ == "__main__":
     import uvicorn
+
     port = int(os.getenv("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
