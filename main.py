@@ -1,17 +1,15 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import joblib
 import numpy as np
+import tensorflow as tf
+import pickle
 from pydantic import BaseModel
 from typing import List, Optional
 import os
-import pickle
-import tensorflow as tf
 
 app = FastAPI()
 
-# ========== CORS ==========
-# Permite los orígenes necesarios (agrega el dominio de Vercel)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -24,41 +22,37 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ... el resto de tu código (carga de modelos, endpoints, etc.) no cambia
 
 # ========== MODELO ESTÁTICO ==========
+modelo_estatico = None
 try:
     modelo_estatico = joblib.load("sign_language_model.pkl")
     print("✅ Modelo estático cargado")
 except Exception as e:
-    print(f"❌ Error modelo estático: {e}")
-    modelo_estatico = None
+    print(f"❌ Error cargando modelo estático: {e}")
 
 # ========== MODELO DINÁMICO (SavedModel) ==========
 modelo_dinamico = None
 le_dinamico = None
 try:
-    # Forzar CPU (evita warnings de GPU)
-    tf.config.set_visible_devices([], 'GPU')
-    # Cargar el SavedModel (cambia "modelo_lsm" por el nombre de tu carpeta)
+    # Cargar el SavedModel desde la carpeta 'modelo_lsm_savedmodel'
     modelo_dinamico = tf.saved_model.load("modelo_lsm_savedmodel")
     # Obtener la firma por defecto
     infer = modelo_dinamico.signatures['serving_default']
     print("✅ Modelo dinámico (SavedModel) cargado")
     print("Firma de entrada:", infer.structured_input_signature)
     print("Firma de salida:", infer.structured_outputs)
-    
+
+    # Cargar el label encoder
     with open("label_encoder.pkl", "rb") as f:
         le_dinamico = pickle.load(f)
 except Exception as e:
     print(f"❌ Error cargando modelo dinámico: {e}")
-    modelo_dinamico = None
-    le_dinamico = None
 
 # ========== CONSTANTES ==========
 LETRAS_ESTATICAS = ["A","B","C","D","E","F","G","H","I","L","M","N","O","P","R","S","T","U","V","W","Y"]
 
-# ========== NORMALIZACIÓN ==========
+# ========== NORMALIZACIÓN (estático) ==========
 def normalizar_puntos_estatico(puntos_lista: list) -> list:
     pts = np.array(puntos_lista[:63], dtype=np.float32).reshape(21, 3)
     muneca = pts[0]
@@ -69,8 +63,8 @@ def normalizar_puntos_estatico(puntos_lista: list) -> list:
 
 # ========== MODELOS DE DATOS ==========
 class DatosMano(BaseModel):
-    puntos: List[float]               # 63 o 136 puntos
-    secuencia: Optional[List[List[float]]] = None   # 20 frames de 136 puntos
+    puntos: List[float]
+    secuencia: Optional[List[List[float]]] = None   # 20 frames de 135 puntos
 
 # ========== ENDPOINT PRINCIPAL ==========
 @app.post("/predecir")
@@ -78,7 +72,7 @@ async def predecir(entrada: DatosMano):
     res_estatico = None
     res_dinamico = None
 
-    # --- Estático ---
+    # --- Modelo estático ---
     if modelo_estatico is not None and len(entrada.puntos) >= 63:
         try:
             puntos_norm = normalizar_puntos_estatico(entrada.puntos)
@@ -92,59 +86,47 @@ async def predecir(entrada: DatosMano):
         except Exception as e:
             print(f"Error en estático: {e}")
 
-    # --- Dinámico (SavedModel) ---
+    # --- Modelo dinámico (SavedModel) ---
     if (modelo_dinamico is not None and le_dinamico is not None and
         entrada.secuencia is not None and len(entrada.secuencia) == 20):
         try:
-            seq = np.array(entrada.secuencia, dtype=np.float32)  # (20, 136)
-            seq = np.expand_dims(seq, axis=0)  # (1, 20, 136)
+            seq = np.array(entrada.secuencia, dtype=np.float32)  # (20, 135)
+            seq = np.expand_dims(seq, axis=0)  # (1, 20, 135)
             input_tensor = tf.convert_to_tensor(seq)
-            
-            # Llamar al SavedModel. Algunos modelos esperan un diccionario con el nombre de la entrada.
-            # Obtenemos el nombre de la primera entrada de la firma
-            input_name = list(infer.structured_input_signature[1].keys())[0]
-            predictions = infer(**{input_name: input_tensor})
-            
-            output = next(iter(predictions.values()))
-            probs = output.numpy()[0]
-            idx = np.argmax(probs)
-            confianza = round(float(probs[idx]) * 100, 2)
-            label = str(le_dinamico.inverse_transform([idx])[0])
-            res_dinamico = {"label": label, "confianza": confianza}
+            # El nombre del tensor de entrada suele ser 'input_1' (ajusta según logs)
+            predictions = infer(input_1=input_tensor)
+            output = predictions['output_0'].numpy()[0]
+            idx = np.argmax(output)
+            confianza = round(float(output[idx]) * 100, 2)
+            signo = le_dinamico.inverse_transform([idx])[0]
+            res_dinamico = {"signo": signo, "confianza": confianza}
         except Exception as e:
             print(f"Error en dinámico: {e}")
 
-    # --- Lógica de selección ---
-    usar_dinamico = (res_dinamico is not None and
-                     res_dinamico["confianza"] > 70 and
-                     (res_estatico is None or res_dinamico["confianza"] >= res_estatico["confianza"]))
-
-    if usar_dinamico:
+    # --- Selección automática (prioriza dinámico con alta confianza) ---
+    if res_dinamico and res_dinamico["confianza"] > 70:
         return {
             "indice": -1,
             "confianza": res_dinamico["confianza"],
-            "signo": res_dinamico["label"],
-            "modelo": "dinamico",
+            "signo": res_dinamico["signo"],
+            "modelo": "dinamico"
         }
-
-    if res_estatico is not None:
+    elif res_estatico:
         signo = LETRAS_ESTATICAS[res_estatico["indice"]] if res_estatico["indice"] < len(LETRAS_ESTATICAS) else "?"
         return {
             "indice": res_estatico["indice"],
             "confianza": res_estatico["confianza"],
             "signo": signo,
-            "modelo": "estatico",
+            "modelo": "estatico"
         }
-
     return {"indice": -1, "confianza": 0, "signo": "", "modelo": "ninguno"}
 
-# ========== ENDPOINT DE ESTADO ==========
 @app.get("/")
 async def root():
     return {
-        "mensaje": "API SeñIA — Dual Model",
-        "modelo_estatico": modelo_estatico is not None,
-        "modelo_dinamico": modelo_dinamico is not None,
+        "mensaje": "API SeñIA Dual",
+        "estatico": modelo_estatico is not None,
+        "dinamico": modelo_dinamico is not None
     }
 
 if __name__ == "__main__":
